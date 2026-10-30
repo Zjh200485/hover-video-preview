@@ -1,0 +1,13 @@
+const assert=require('node:assert/strict');
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const folder=path.join(__dirname,'..'),core=require(path.join(folder,'core.js'));
+const key='A'.repeat(32);
+assert.deepEqual(core.parseCode('52637:'+key),{url:'http://127.0.0.1:52637',key});
+for(const bad of ['https://example.com:'+key,'12345:'+key,'52637:short','52637:'+key+'\r\nX: 1']) assert.throws(()=>core.parseCode(bad));
+assert.deepEqual(core.normalizedCrop({left:.25,top:.25,right:.75,bottom:.75},1280,720),{x:320,y:180,width:640,height:360});
+assert.deepEqual(core.normalizedCrop({left:-1,top:0,right:1,bottom:1},1280,720),{x:0,y:0,width:1280,height:720});
+const manifest=JSON.parse(fs.readFileSync(path.join(folder,'manifest.json'),'utf8'));
+assert.deepEqual(manifest.host_permissions,['http://127.0.0.1:52637/*']);
+assert.equal(manifest.manifest_version,3);
+for(const f of ['background.js','offscreen.js','popup.js','core.js'])new vm.Script(fs.readFileSync(path.join(folder,f),'utf8'),{filename:f});
+console.log('PASS 配对码校验、限制本机目标、画面裁剪、扩展清单和脚本语法');

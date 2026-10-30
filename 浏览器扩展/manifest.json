@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "悬停视频预览 · 后台连接",
+  "version": "2.3.0",
+  "minimum_chrome_version": "116",
+  "description": "把你主动选择的视频标签页实时传给本机悬停预览工具，切换标签页后继续观看。",
+  "permissions": ["activeTab", "tabCapture", "offscreen", "storage", "scripting", "alarms"],
+  "host_permissions": ["http://127.0.0.1:52637/*"],
+  "action": {"default_title": "连接后台视频预览", "default_popup": "popup.html"},
+  "background": {"service_worker": "background.js"},
+  "commands": {
+    "_execute_action": {"suggested_key": {"default": "Alt+Shift+H"}},
+    "reload-extension": {"suggested_key": {"default": "Alt+Shift+R"}, "description": "重新载入悬停视频预览扩展（中断当前连接）"}
+  }
+}
