@@ -41,3 +41,4 @@ source = source.slice(0, begin) + `
  await root.detach();
 ` + source.slice(end);
 Function('require', '__dirname', source)(createRequire(file), __dirname);
+

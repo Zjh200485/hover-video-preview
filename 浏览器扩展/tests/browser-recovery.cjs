@@ -70,7 +70,7 @@ async function main(){
  report.push('PASS 接收器故障 70 秒后自动恢复同一采集流，全程无需重连或重载');
  await worker.evaluate(()=>chrome.storage.local.set({connectionCode:'52637:'+'A'.repeat(32)}));
  const popup=await browser.newPage();await popup.goto('chrome-extension://'+id+'/popup.html');
- assert.equal(await popup.evaluate(()=>chrome.runtime.getManifest().version),'2.3.0');
+ assert.equal(await popup.evaluate(()=>chrome.runtime.getManifest().version),JSON.parse(fs.readFileSync(path.join(extension,'manifest.json'),'utf8')).version);
  await popup.locator('#status').filter({hasText:'正在预览'}).waitFor();
  await popup.locator('body').screenshot({path:path.join(out,'popup.png')});
  await popup.locator('#stop').click();await until(async()=>!(await worker.evaluate(()=>chrome.storage.session.get('captureRequest'))).captureRequest);
@@ -85,3 +85,4 @@ main().catch(error=>{report.push('FAIL '+error.stack);process.exitCode=1;}).fina
  if(pages)pages.close();if(receiver)receiver.close();
  fs.writeFileSync(path.join(out,'report.txt'),report.join('\n'),'utf8');console.log(report.join('\n'));console.log('报告目录：'+out);
 });
+

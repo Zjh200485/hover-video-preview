@@ -24,6 +24,8 @@ async function stopCapture(error='') {
   clearInterval(current.timer);current.abort?.abort();
   clearInterval(current.healthTimer);
   current.stream.getTracks().forEach(track=>track.stop());video.srcObject=null;
+  // Release the backing surface even when a canvas encoder is stuck.
+  canvas.width=1;canvas.height=1;
   if (current.audio) await timeout(current.audio.close(),700).catch(()=>{});
   if (current.frameTask) await timeout(current.frameTask,2800).catch(()=>{});
   await fetch(current.connection.url+'/stop',{method:'POST',headers:{'X-Hover-Key':current.connection.key,'X-Hover-Session':current.sessionId},signal:AbortSignal.timeout(700)}).catch(()=>{});
@@ -41,7 +43,15 @@ async function sendFrame(current) {
     const width=Math.max(2,Math.round(crop.width*scale)),height=Math.max(2,Math.round(crop.height*scale));
     if(canvas.width!==width || canvas.height!==height){canvas.width=width;canvas.height=height;}
     context.drawImage(video,crop.x,crop.y,crop.width,crop.height,0,0,width,height);
-    const blob=await timeout(new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',.78)),2500,'画面转换超时，请点击“修复并重连”。');
+    let blob;
+    try {
+      blob=await timeout(new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',.78)),2500);
+    } catch {
+      // A timeout cannot cancel toBlob. Retrying would queue more native encoders
+      // behind the same stuck operation and can exhaust browser memory.
+      fatalError='画面转换超时，已停止采集以释放资源。请回到视频页点击“修复并重连”。';
+      throw new Error(fatalError);
+    }
     if(session!==current) return;
     if(!blob) throw new Error('暂时无法读取视频画面。');
     current.lastEncodedAt=Date.now();
@@ -73,7 +83,8 @@ async function startCapture(message) {
   await stopCapture();
   const stream=await navigator.mediaDevices.getUserMedia({
     audio:{mandatory:{chromeMediaSource:'tab',chromeMediaSourceId:message.streamId}},
-    video:{mandatory:{chromeMediaSource:'tab',chromeMediaSourceId:message.streamId,maxFrameRate:30}}
+    // Bound the actual capture stream, not only the later JPEG canvas.
+    video:{mandatory:{chromeMediaSource:'tab',chromeMediaSourceId:message.streamId,maxWidth:1280,maxHeight:720,maxFrameRate:15}}
   });
   const current={stream,connection:message.connection,crop:message.crop,title:message.title,
     tabId:message.tabId,sessionId:message.sessionId,busy:false,failures:0,timer:null,audio:null,
@@ -86,7 +97,7 @@ async function startCapture(message) {
     if(stream.getAudioTracks().length){current.audio=new AudioContext();current.audio.createMediaStreamSource(stream).connect(current.audio.destination);await current.audio.resume();}
     stream.getVideoTracks()[0].addEventListener('ended',()=>{if(session===current)void stopCapture('视频标签页已关闭或已停止提供画面。');},{once:true});
     const tick=()=>{if(!current.busy)current.frameTask=sendFrame(current);};
-    current.timer=setInterval(tick,67);
+    current.timer=setInterval(tick,100);
     current.healthTimer=setInterval(()=>{
       if(session!==current)return;
       // This is our internal playback element. Resuming it does not unpause

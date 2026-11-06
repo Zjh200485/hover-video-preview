@@ -11,3 +11,4 @@ assert.deepEqual(manifest.host_permissions,['http://127.0.0.1:52637/*']);
 assert.equal(manifest.manifest_version,3);
 for(const f of ['background.js','offscreen.js','popup.js','core.js'])new vm.Script(fs.readFileSync(path.join(folder,f),'utf8'),{filename:f});
 console.log('PASS 配对码校验、限制本机目标、画面裁剪、扩展清单和脚本语法');
+

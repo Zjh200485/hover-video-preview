@@ -45,7 +45,7 @@ async function getVideoCrop(tabId) {
     return results[0]?.result || null;
   } catch { return null; }
 }
-async function startCapture(code, originalTab=null) {
+async function startCapture(code, originalTab=null, recovery=null) {
   return exclusively(async()=>{
   const connection = HoverCore.parseCode(code);
   let response;
@@ -56,6 +56,7 @@ async function startCapture(code, originalTab=null) {
   const tab = originalTab || (await timeout(chrome.tabs.query({active:true,currentWindow:true}),2000))[0];
   if (!tab?.id || (!originalTab && !/^https?:\/\//i.test(tab.url||''))) throw new Error('请先切到正在播放视频的网页，再打开这个扩展。');
   const sessionId=crypto.randomUUID(),title=tab.title||'视频标签页';
+  const request={tabId:tab.id,title,code,sessionId,recovery};
   // The recovery request is the authority for capture intent, not GET_STATE.
   // Replacing a manual selection must never leave the previous tab scheduled.
   await chrome.storage.session.remove('captureRequest');
@@ -64,7 +65,7 @@ async function startCapture(code, originalTab=null) {
   await resetCapture();
   await waitForRelease(tab.id);
   await ensureOffscreen();
-  await chrome.storage.session.set({captureRequest:{tabId:tab.id,title,code,sessionId}});
+  await chrome.storage.session.set({captureRequest:request});
   const crop = await timeout(getVideoCrop(tab.id),2000).catch(()=>null);
   const streamId = await timeout(chrome.tabCapture.getMediaStreamId({targetTabId:tab.id}),5000);
   const result = await timeout(chrome.runtime.sendMessage({target:'offscreen',type:'START',streamId,connection,crop,title,tabId:tab.id,sessionId}),12000);
@@ -72,7 +73,7 @@ async function startCapture(code, originalTab=null) {
   const live=await timeout(chrome.runtime.sendMessage({target:'offscreen',type:'STATUS'}),1500);
   if (!live?.active || live.sessionId!==sessionId || endedSessions.has(sessionId)) throw new Error(live?.error||'视频采集已结束，请再次连接。');
   await chrome.storage.session.set({captureState:live});
-  await chrome.storage.session.set({captureRequest:{tabId:tab.id,title,code,sessionId}});
+  await chrome.storage.session.set({captureRequest:request});
   await chrome.alarms.create('hover-capture-health',{periodInMinutes:1});
   if(endedSessions.has(sessionId))throw new Error('视频采集已结束，请再次连接。');
   return {ok:true,title};
@@ -100,8 +101,25 @@ async function recoverCapture(expectedSessionId) {
   }
   const currentRequest=(await chrome.storage.session.get('captureRequest')).captureRequest;
   if(!currentRequest || currentRequest.sessionId!==request.sessionId || changing)return;
+  // Keep this budget in session storage: a new stream or restarted worker must
+  // not reset it. Repeated capture resets can amplify renderer/resource failures.
+  const now=Date.now();
+  const recovery=request.recovery && now-request.recovery.since<300000
+    ? {...request.recovery} : {since:now,count:0};
+  if(recovery.count>=3){
+    await exclusively(async()=>{
+      const latest=(await chrome.storage.session.get('captureRequest')).captureRequest;
+      if(latest?.sessionId!==request.sessionId)return;
+      await chrome.storage.session.remove('captureRequest');
+      await chrome.alarms.clear('hover-capture-health');
+      await resetCapture().catch(()=>{});
+      await chrome.storage.session.set({captureState:{active:false,error:'视频采集反复中断，已停止自动重连以释放资源。请确认原视频页正常后点击“修复并重连”。'}});
+    });
+    return;
+  }
+  recovery.count++;
   // Recover the original user-selected tab; never capture the currently active other tab.
-  try { await startCapture(request.code,tab); }
+  try { await startCapture(request.code,tab,recovery); }
   catch(error) {
     await chrome.storage.session.set({captureState:{active:false,error:'自动恢复暂未成功：'+error.message+' 可回到原视频页点击“修复并重连”，无需重新导入扩展。'}});
   }

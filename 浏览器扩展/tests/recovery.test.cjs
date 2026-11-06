@@ -79,10 +79,10 @@ test('concurrent captures are rejected and the recovery shortcut reloads directl
 });
 function offscreen(){
   let listener,now=100000,mode='ok',tick,healthTick,cleared=0,trackStops=0,posted=0,audiosClosed=0;
-  const ended=[],tracks=[];
+  const ended=[],tracks=[];let encodes=0,constraints;
   class Clock extends Date{static now(){return now;}}
   const video={readyState:4,videoWidth:640,videoHeight:360,currentTime:0,paused:false,play:async()=>{video.paused=false;},srcObject:null};
-  const canvas={getContext:()=>({drawImage(){}}),toBlob:fn=>{if(mode!=='blob-hang')fn({bytes:'image'});}};
+  const canvas={getContext:()=>({drawImage(){}}),toBlob:fn=>{encodes++;if(mode!=='blob-hang')fn({bytes:'image'});}};
   const makeStream=()=>{
     const track={readyState:'live',stop(){this.readyState='ended';trackStops++;},addEventListener(){}};tracks.push(track);
     return {getTracks:()=>[track],getVideoTracks:()=>[track],getAudioTracks:()=>[{}]};
@@ -90,10 +90,10 @@ function offscreen(){
   const sandbox=vm.createContext({console,Date:Clock,AbortController,AbortSignal,
     HoverCore:{...core,withTimeout:(task,ms)=>core.withTimeout(task,Math.min(ms,35))},
     document:{getElementById:id=>id==='video'?video:canvas},
-    navigator:{mediaDevices:{getUserMedia:async()=>makeStream()}},
+    navigator:{mediaDevices:{getUserMedia:async value=>{constraints=value;return makeStream();}}},
     AudioContext:class{createMediaStreamSource(){return {connect(){}};}get destination(){return {};}
       async resume(){} close(){audiosClosed++;return mode==='audio-hang'?new Promise(()=>{}):Promise.resolve();}},
-    setTimeout,clearTimeout,setInterval:(fn,ms)=>{if(ms===67)tick=fn;else healthTick=fn;return ms;},clearInterval:()=>cleared++,
+    setTimeout,clearTimeout,setInterval:(fn,ms)=>{if(ms<1000)tick=fn;else healthTick=fn;return ms;},clearInterval:()=>cleared++,
     fetch:async url=>{
       if(url.endsWith('/stop') || url.endsWith('/start'))return {ok:true};posted++;
       if(mode==='offline')throw new Error('network down');
@@ -104,7 +104,7 @@ function offscreen(){
   vm.runInContext(fs.readFileSync(path.join(folder,'offscreen.js'),'utf8'),sandbox);
   const message=(type,extra={})=>new Promise(resolve=>listener({target:'offscreen',type,...extra},{id:'test'},resolve));
   return {sandbox,message,video,set mode(value){mode=value;},advance:ms=>{now+=ms;if(!video.paused)video.currentTime+=ms/1000;},
-    tick:async()=>{tick();await flush();},stats:()=>({cleared,trackStops,posted,audiosClosed,ended}),tracks,
+    tick:async()=>{tick();await flush();},stats:()=>({cleared,trackStops,posted,audiosClosed,ended,encodes,constraints}),tracks,canvas,
     health:async()=>{healthTick();await flush();},
     start:()=>message('START',{streamId:'stream',connection:core.parseCode(code),title:'视频',tabId:7,sessionId:randomUUID()})};
 }
@@ -127,12 +127,43 @@ test('missing video frames request recovery without silently terminating capture
   assert.equal((await o.message('STATUS')).active,true);assert.equal((await o.message('STATUS')).sourceStalled,true);
   assert.equal(o.stats().trackStops,0);await o.message('STOP');
 });
-test('a stuck canvas encoder and stuck audio shutdown cannot block STOP or the next START',async()=>{
+test('a timed-out encoder stops capture instead of queuing more native work',async()=>{
   const o=offscreen();o.mode='blob-hang';await o.start();
   await new Promise(resolve=>setTimeout(resolve,45));
-  assert.equal((await o.message('STATUS')).reconnecting,true);
-  o.mode='audio-hang';assert.equal((await o.message('STOP')).ok,true);assert.equal(o.stats().trackStops,1);
+  assert.equal((await o.message('STATUS')).active,false);
+  assert.match((await o.message('STATUS')).error,/画面转换超时/);
+  for(let i=0;i<30;i++){o.advance(3000);await o.tick();}
+  assert.equal(o.stats().encodes,1);assert.equal(o.stats().trackStops,1);
+  assert.equal(o.canvas.width,1);assert.equal(o.canvas.height,1);
+  assert.ok(o.stats().ended.some(m=>m.type==='CAPTURE_ENDED'));
   o.mode='ok';assert.equal((await o.start()).ok,true);await o.message('STOP');
+});
+test('stuck audio shutdown cannot block STOP or the next START',async()=>{
+  const o=offscreen();await o.start();await flush();o.mode='audio-hang';
+  assert.equal((await o.message('STOP')).ok,true);assert.equal(o.stats().trackStops,1);
+  o.mode='ok';assert.equal((await o.start()).ok,true);await o.message('STOP');
+});
+test('capture size and frame rate are limited before frames reach the encoder',async()=>{
+  const o=offscreen();await o.start();await flush();
+  const c=o.stats().constraints.video.mandatory;
+  assert.equal(c.maxWidth,1280);assert.equal(c.maxHeight,720);assert.equal(c.maxFrameRate,15);
+  await o.message('STOP');assert.equal(o.canvas.width,1);assert.equal(o.canvas.height,1);
+});
+test('repeated source failures stop automatic recapture after three attempts',async()=>{
+  const b=background();await b.message('START_CAPTURE',{code});
+  for(let i=0;i<3;i++){b.flags.open=false;await b.recover();assert.equal(b.data.captureRequest.recovery.count,i+1);}
+  const created=b.flags.created;b.flags.open=false;await b.recover();
+  assert.equal(b.flags.created,created);assert.equal(b.data.captureRequest,undefined);
+  assert.match(b.data.captureState.error,/停止自动重连/);
+  await b.recover();assert.equal(b.flags.created,created);
+  assert.equal((await b.message('REPAIR_CAPTURE',{code})).ok,true);
+  assert.equal(b.data.captureRequest.recovery,null);
+});
+test('recovery budget expires after five minutes of normal operation',async()=>{
+  const b=background();await b.message('START_CAPTURE',{code});
+  b.data.captureRequest.recovery={since:Date.now()-300001,count:3};
+  b.flags.open=false;await b.recover();
+  assert.equal(b.data.captureState.active,true);assert.equal(b.data.captureRequest.recovery.count,1);
 });
 test('waits for delayed Chromium stream release before reacquiring capture',async()=>{
   const b=background();b.flags.open=true;b.flags.releasePending=2;
@@ -213,3 +244,4 @@ test('paused internal playback resumes, and static pixels with advancing time st
   assert.equal(o.stats().ended.filter(m=>m.type==='RECOVER_CAPTURE').length,0);
   await o.message('STOP');
 });
+
